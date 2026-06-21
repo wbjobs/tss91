@@ -204,25 +204,30 @@ app.post('/api/register/verify', async (req, res) => {
 
   if (verified && registrationInfo) {
     const { credentialPublicKey, credentialID, counter } = registrationInfo;
+    const credentialIdB64 = isoBase64URL.fromBuffer(credentialID);
 
-    const existing = db.prepare('SELECT id FROM credentials WHERE credential_id = ?').get(
-      isoBase64URL.fromBuffer(credentialID)
+    const stmt = db.prepare(`
+      INSERT INTO credentials (credential_id, public_key, counter, device_name, user_agent, transports, created_at, last_used_at)
+      VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT(credential_id) DO UPDATE SET
+        public_key = excluded.public_key,
+        counter = MAX(counter, excluded.counter),
+        device_name = COALESCE(NULLIF(excluded.device_name, 'Unnamed Device'), credentials.device_name),
+        user_agent = excluded.user_agent,
+        transports = excluded.transports,
+        last_used_at = CURRENT_TIMESTAMP
+    `);
+    stmt.run(
+      credentialIdB64,
+      Buffer.from(credentialPublicKey),
+      counter,
+      deviceName,
+      info.userAgent,
+      JSON.stringify(body.response?.transports || [])
     );
 
-    if (!existing) {
-      db.prepare(`INSERT INTO credentials (credential_id, public_key, counter, device_name, user_agent, transports)
-                  VALUES (?, ?, ?, ?, ?, ?)`).run(
-        isoBase64URL.fromBuffer(credentialID),
-        Buffer.from(credentialPublicKey),
-        counter,
-        deviceName,
-        info.userAgent,
-        JSON.stringify(body.response?.transports || [])
-      );
-    }
-
     db.prepare(`INSERT INTO auth_logs (credential_id, device_name, user_agent, ip_address, success)
-                VALUES (?, ?, ?, ?, 1)`).run(isoBase64URL.fromBuffer(credentialID), deviceName, info.userAgent, info.ip);
+                VALUES (?, ?, ?, ?, 1)`).run(credentialIdB64, deviceName, info.userAgent, info.ip);
 
     req.session.currentChallenge = undefined;
     return res.json({ verified: true });
@@ -292,11 +297,39 @@ app.post('/api/auth/verify', async (req, res) => {
   const { verified, authenticationInfo } = verification;
 
   if (verified) {
-    db.prepare('UPDATE credentials SET counter = ?, last_used_at = CURRENT_TIMESTAMP WHERE credential_id = ?')
-      .run(authenticationInfo.newCounter, body.id);
+    const newCounter = authenticationInfo.newCounter;
+    const oldCounter = credentialRow.counter;
 
-    db.prepare(`INSERT INTO auth_logs (credential_id, device_name, user_agent, ip_address, success)
-                VALUES (?, ?, ?, ?, 1)`).run(body.id, credentialRow.device_name, info.userAgent, info.ip);
+    const tx = db.transaction((credId, nc, oc, devName, ua, ip) => {
+      const result = db.prepare(`
+        UPDATE credentials
+        SET counter = ?, last_used_at = CURRENT_TIMESTAMP
+        WHERE credential_id = ? AND counter <= ?
+      `).run(nc, credId, oc);
+
+      if (result.changes === 0) {
+        const latest = db.prepare('SELECT counter FROM credentials WHERE credential_id = ?').get(credId);
+        db.prepare(`INSERT INTO auth_logs (credential_id, device_name, user_agent, ip_address, success, error_message)
+                    VALUES (?, ?, ?, ?, 0, ?)`).run(
+          credId, devName, ua, ip,
+          `Counter collision: expected <= ${oc}, received ${nc}, DB latest ${latest?.counter ?? '?'}`
+        );
+        return { ok: false, reason: 'counter_collision' };
+      }
+
+      db.prepare(`INSERT INTO auth_logs (credential_id, device_name, user_agent, ip_address, success)
+                  VALUES (?, ?, ?, ?, 1)`).run(credId, devName, ua, ip);
+      return { ok: true };
+    });
+
+    const txResult = tx(body.id, newCounter, oldCounter, credentialRow.device_name, info.userAgent, info.ip);
+
+    if (!txResult.ok) {
+      return res.status(409).json({
+        verified: false,
+        error: 'Concurrent authentication rejected (counter rollback detected). Please retry.',
+      });
+    }
 
     if (!req.session.userId) {
       req.session.userId = crypto.randomBytes(16).toString('hex');
