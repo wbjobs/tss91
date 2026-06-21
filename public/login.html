@@ -12,7 +12,7 @@
       <div class="brand">
         <div class="logo">🔐</div>
         <h1>内部工具门户</h1>
-        <p class="subtitle">使用指纹、人脸或物理安全密钥登录</p>
+        <p class="subtitle">使用安全密钥或临时授权码登录</p>
       </div>
 
       <div id="bootstrap-section" class="section hidden">
@@ -28,11 +28,38 @@
         </button>
       </div>
 
-      <div id="auth-section" class="section">
-        <button id="signin-btn" class="btn btn-primary btn-large">
-          <span class="btn-icon">🖐️</span> 使用安全密钥登录
-        </button>
-        <p class="hint">浏览器将提示您使用指纹、面部识别或插入物理安全密钥</p>
+      <div id="tabs-section" class="section">
+        <div class="tabs" role="tablist">
+          <button class="tab active" role="tab" data-tab="webauthn">
+            <span class="tab-icon">🖐️</span> 安全密钥
+          </button>
+          <button class="tab" role="tab" data-tab="code">
+            <span class="tab-icon">🎫</span> 临时授权码
+          </button>
+        </div>
+
+        <div id="tab-webauthn" class="tab-panel active">
+          <button id="signin-btn" class="btn btn-primary btn-large">
+            <span class="btn-icon">�</span> 使用安全密钥登录
+          </button>
+          <p class="hint">浏览器将提示您使用指纹、面部识别或插入物理安全密钥</p>
+        </div>
+
+        <div id="tab-code" class="tab-panel">
+          <div class="form-row">
+            <label for="code-input">6 位授权码</label>
+            <input id="code-input" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6"
+                   placeholder="例如：482 913" autocomplete="one-time-code" />
+          </div>
+          <div class="form-row">
+            <label for="code-device-name">设备名称（可选）</label>
+            <input id="code-device-name" type="text" placeholder="例如：张三的临时设备" />
+          </div>
+          <button id="code-login-btn" class="btn btn-primary btn-large">
+            <span class="btn-icon">➡️</span> 使用授权码登录
+          </button>
+          <p class="hint">向已在线的管理员获取一次性授权码，有效期 5 分钟</p>
+        </div>
       </div>
 
       <div id="status" class="status hidden"></div>
@@ -47,11 +74,34 @@
   <script>
     (async function () {
       const statusEl = document.getElementById('status');
-      const authSection = document.getElementById('auth-section');
+      const authSection = document.getElementById('tabs-section');
       const bootstrapSection = document.getElementById('bootstrap-section');
       const signinBtn = document.getElementById('signin-btn');
       const bootstrapBtn = document.getElementById('bootstrap-btn');
       const bootstrapDeviceName = document.getElementById('bootstrap-device-name');
+      const codeInput = document.getElementById('code-input');
+      const codeDeviceName = document.getElementById('code-device-name');
+      const codeLoginBtn = document.getElementById('code-login-btn');
+
+      document.querySelectorAll('.tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+          document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+          document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+          tab.classList.add('active');
+          document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+          hideStatus();
+        });
+      });
+
+      codeInput.addEventListener('input', () => {
+        let v = codeInput.value.replace(/\D/g, '').slice(0, 6);
+        if (v.length > 3) v = v.slice(0, 3) + ' ' + v.slice(3);
+        codeInput.value = v;
+      });
+
+      codeLoginBtn.addEventListener('keydown', e => { if (e.key === 'Enter') codeLoginBtn.click(); });
+      codeInput.addEventListener('keydown', e => { if (e.key === 'Enter') codeLoginBtn.click(); });
+      codeDeviceName.addEventListener('keydown', e => { if (e.key === 'Enter') codeLoginBtn.click(); });
 
       function showStatus(msg, isError = false) {
         statusEl.textContent = msg;
@@ -69,9 +119,8 @@
           window.location.href = '/manage';
           return;
         }
-        const devices = await fetch('/api/devices').catch(() => ({ json: () => [] }));
-        const deviceList = await (devices.json && devices.json().catch(() => [])) || [];
-        if (!Array.isArray(deviceList) || deviceList.length === 0) {
+        const setup = await fetch('/api/setup/status').then(r => r.json().catch(() => ({ hasAnyCredentials: true })));
+        if (!setup.hasAnyCredentials) {
           authSection.classList.add('hidden');
           bootstrapSection.classList.remove('hidden');
         }
@@ -95,13 +144,47 @@
             showStatus('✅ 认证成功，正在进入...');
             setTimeout(() => window.location.href = '/manage', 500);
           } else {
-            showStatus('❌ 认证失败', true);
+            showStatus('❌ ' + (result.error || '认证失败'), true);
           }
         } catch (err) {
           console.error(err);
           showStatus('❌ ' + (err.message || '认证被取消或失败'), true);
         } finally {
           signinBtn.disabled = false;
+        }
+      });
+
+      codeLoginBtn.addEventListener('click', async () => {
+        hideStatus();
+        const code = codeInput.value.replace(/\D/g, '');
+        if (code.length !== 6) {
+          showStatus('请输入完整的 6 位授权码', true);
+          return;
+        }
+        codeLoginBtn.disabled = true;
+        showStatus('正在验证授权码...');
+
+        try {
+          const r = await fetch('/api/temp-codes/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              code,
+              deviceName: codeDeviceName.value.trim() || undefined,
+            }),
+          });
+          const result = await r.json();
+          if (result.verified) {
+            showStatus('✅ 登录成功，正在进入...');
+            setTimeout(() => window.location.href = '/manage', 500);
+          } else {
+            showStatus('❌ ' + (result.error || '授权码无效'), true);
+          }
+        } catch (err) {
+          console.error(err);
+          showStatus('❌ ' + (err.message || '网络错误'), true);
+        } finally {
+          codeLoginBtn.disabled = false;
         }
       });
 
@@ -126,7 +209,7 @@
             showStatus('✅ 设备注册成功！正在进入管理页...');
             setTimeout(() => window.location.href = '/manage', 800);
           } else {
-            showStatus('❌ 注册失败', true);
+            showStatus('❌ ' + (result.error || '注册失败'), true);
           }
         } catch (err) {
           console.error(err);
@@ -137,9 +220,8 @@
       });
 
       if (!window.PublicKeyCredential) {
-        authSection.classList.add('hidden');
-        bootstrapSection.classList.add('hidden');
-        showStatus('您的浏览器不支持 WebAuthn，请使用 Chrome / Edge / Safari 最新版本', true);
+        document.querySelector('[data-tab="webauthn"]').style.display = 'none';
+        document.querySelector('.tab[data-tab="code"]').click();
       }
     })();
   </script>

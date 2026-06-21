@@ -34,6 +34,22 @@
 
       <section class="panel">
         <div class="panel-header">
+          <h2>🎫 临时授权码</h2>
+          <div class="register-row">
+            <input id="new-code-note" type="text" placeholder="备注（如：张三的手机）" maxlength="120" />
+            <button id="generate-code-btn" class="btn btn-primary">
+              <span class="btn-icon">🔢</span> 生成授权码
+            </button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <ul id="code-list" class="code-list"></ul>
+          <div id="code-empty" class="empty-state hidden">暂无授权码记录</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
           <h2>📋 认证日志</h2>
           <span id="log-count" class="log-count"></span>
         </div>
@@ -43,6 +59,19 @@
         </div>
       </section>
     </main>
+  </div>
+
+  <div id="code-modal" class="modal-backdrop hidden">
+    <div class="modal">
+      <h3>🎫 临时授权码已生成</h3>
+      <p>请立即将以下 6 位数字告知用户，有效期 5 分钟，仅可使用一次。</p>
+      <div id="new-code-display" class="code-big">000 000</div>
+      <p class="code-copy-hint">📋 点击上方数字可选中复制</p>
+      <div id="new-code-expire" style="text-align:center;font-size:12px;color:#94a3b8;margin-bottom:12px;"></div>
+      <div class="modal-actions">
+        <button id="close-modal-btn" class="btn btn-secondary">完成</button>
+      </div>
+    </div>
   </div>
 
   <div id="status" class="auth-container hidden" style="min-height:0;position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:100;">
@@ -62,6 +91,22 @@
       const logoutBtn = document.getElementById('logout-btn');
       const statusEl = document.getElementById('status');
 
+      const codeListEl = document.getElementById('code-list');
+      const codeEmptyEl = document.getElementById('code-empty');
+      const generateCodeBtn = document.getElementById('generate-code-btn');
+      const newCodeNote = document.getElementById('new-code-note');
+      const codeModal = document.getElementById('code-modal');
+      const closeModalBtn = document.getElementById('close-modal-btn');
+      const newCodeDisplay = document.getElementById('new-code-display');
+      const newCodeExpire = document.getElementById('new-code-expire');
+
+      let countdownTimers = [];
+
+      function clearCountdowns() {
+        countdownTimers.forEach(id => clearInterval(id));
+        countdownTimers = [];
+      }
+
       function showStatus(msg, isError = false) {
         statusEl.classList.remove('hidden');
         const card = statusEl.querySelector('.card');
@@ -80,6 +125,16 @@
 
       function shortId(id) {
         return id ? id.slice(0, 10) + '…' : '';
+      }
+
+      function fmtCountdown(expiresAtStr, created) {
+        const total = new Date(expiresAtStr).getTime() - Date.now();
+        if (total <= 0) return { text: '已过期', cls: 'expired' };
+        const sec = Math.floor(total / 1000);
+        const m = Math.floor(sec / 60);
+        const s = sec % 60;
+        const text = `${m}:${String(s).padStart(2, '0')}`;
+        return { text, cls: sec < 60 ? 'warning' : '' };
       }
 
       async function loadDevices() {
@@ -126,6 +181,117 @@
           showStatus('删除失败', true);
         }
       }
+
+      async function loadCodes() {
+        clearCountdowns();
+        const codes = await fetch('/api/temp-codes').then(r => r.json());
+        codeListEl.innerHTML = '';
+        if (!codes.length) {
+          codeEmptyEl.classList.remove('hidden');
+          return;
+        }
+        codeEmptyEl.classList.add('hidden');
+        codes.forEach(c => {
+          const isExpired = new Date(c.expires_at).getTime() < Date.now();
+          const isUsed = !!c.used_at;
+          const isRevoked = !!c.revoked;
+
+          let badge = '';
+          if (isRevoked) badge = '<span class="badge badge-muted">已撤销</span>';
+          else if (isUsed) badge = '<span class="badge badge-success">已使用</span>';
+          else if (isExpired) badge = '<span class="badge badge-danger">已过期</span>';
+          else badge = '<span class="badge badge-success">有效</span>';
+
+          const li = document.createElement('li');
+          li.className = 'code-item';
+          li.setAttribute('data-id', c.id);
+
+          const displayCode = c.code.slice(0, 3) + ' ' + c.code.slice(3);
+          const canRevoke = !isUsed && !isRevoked && !isExpired;
+
+          li.innerHTML = `
+            <div class="code-main">
+              <div class="code-head">
+                <span class="code-num">${escapeHtml(displayCode)}</span>
+                ${badge}
+              </div>
+              <div class="code-meta">
+                <span class="code-countdown" data-expires="${c.expires_at"></span>
+                <span>创建: ${fmtTime(c.created_at)}</span>
+                ${c.note ? `<span>备注: ${escapeHtml(c.note)}</span>` : ''}
+                ${c.used_at ? `<span>使用: ${fmtTime(c.used_at)} · ${escapeHtml(c.used_by_ip || '')}</span>` : ''}
+                ${isRevoked ? `<span style="color:#ef4444;">已撤销</span>` : ''}
+              </div>
+            </div>
+            ${canRevoke ? `<button class="btn btn-ghost btn-danger" style="color:#fca5a5;border:1px solid rgba(239,68,68,0.3);padding:6px 12px;border-radius:8px;background:transparent;cursor:pointer;font-weight:600;font-family:inherit;font-size:13px;">撤销</button>` : ''}
+          `;
+          codeListEl.appendChild(li);
+        });
+
+        codeListEl.querySelectorAll('button').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const id = btn.closest('.code-item').dataset.id;
+            revokeCode(id);
+          });
+        });
+
+        codeListEl.querySelectorAll('.code-countdown').forEach(el => {
+          const expires = el.getAttribute('data-expires');
+          const update = () => {
+            const { text, cls } = fmtCountdown(expires);
+            el.textContent = `剩余 ${text}`;
+            el.className = 'code-countdown ' + cls;
+          };
+          update();
+          countdownTimers.push(setInterval(update, 1000));
+        });
+      }
+
+      async function revokeCode(id) {
+        if (!confirm('确认撤销该授权码？用户将无法使用。')) return;
+        const res = await fetch(`/api/temp-codes/${id}/revoke`, { method: 'POST' }).then(r => r.json());
+        if (res.ok) {
+          showStatus('授权码已撤销');
+          loadCodes();
+        } else {
+          showStatus('撤销失败', true);
+        }
+      }
+
+      generateCodeBtn.addEventListener('click', async () => {
+        generateCodeBtn.disabled = true;
+        showStatus('正在生成授权码...');
+        try {
+          const r = await fetch('/api/temp-codes/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ note: newCodeNote.value.trim() || undefined }),
+          }).then(r => r.json());
+          if (r.ok) {
+            const code = r.code;
+            const display = code.code.slice(0, 3) + ' ' + code.code.slice(3);
+            newCodeDisplay.textContent = display;
+            newCodeDisplay.onclick = () => {
+              navigator.clipboard?.writeText(code.code);
+            };
+            newCodeExpire.textContent = `⏱️ 过期时间: ${fmtTime(code.expires_at)}（5 分钟有效）`;
+            codeModal.classList.remove('hidden');
+            newCodeNote.value = '';
+            showStatus('✅ 授权码已生成');
+            loadCodes();
+            loadLogs();
+          } else {
+            showStatus('❌ ' + (r.error || '生成失败'), true);
+          }
+        } catch (err) {
+          showStatus('❌ ' + (err.message || '生成失败'), true);
+        } finally {
+          generateCodeBtn.disabled = false;
+        }
+      });
+
+      closeModalBtn.addEventListener('click', () => codeModal.classList.add('hidden'));
+      codeModal.addEventListener('click', (e) => { if (e.target === codeModal) codeModal.classList.add('hidden'));
 
       async function loadLogs() {
         const logs = await fetch('/api/logs?limit=200').then(r => r.json());
@@ -183,7 +349,7 @@
             loadDevices();
             loadLogs();
           } else {
-            showStatus('❌ 注册失败', true);
+            showStatus('❌ ' + (result.error || '注册失败'), true);
           }
         } catch (err) {
           console.error(err);
@@ -204,7 +370,10 @@
       }
 
       loadDevices();
+      loadCodes();
       loadLogs();
+
+      setInterval(() => loadCodes(), 30000);
     })();
   </script>
 </body>

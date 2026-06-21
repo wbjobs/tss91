@@ -69,6 +69,19 @@ db.exec(`
     error_message TEXT,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS temp_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL UNIQUE,
+    generated_by TEXT NOT NULL,
+    note TEXT,
+    expires_at DATETIME NOT NULL,
+    used_at DATETIME,
+    used_by_ip TEXT,
+    used_by_ua TEXT,
+    revoked INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 function isInternalIp(req) {
@@ -129,6 +142,11 @@ app.get('/api/session', (req, res) => {
   } else {
     res.json({ authenticated: false });
   }
+});
+
+app.get('/api/setup/status', (req, res) => {
+  const credentials = db.prepare('SELECT COUNT(*) AS c FROM credentials').get().c;
+  res.json({ hasAnyCredentials: credentials > 0, totalCredentials: credentials });
 });
 
 app.get('/api/register/options', async (req, res) => {
@@ -371,6 +389,121 @@ app.get('/api/logs', requireAuth, (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
   const logs = db.prepare(`SELECT * FROM auth_logs ORDER BY timestamp DESC LIMIT ?`).all(limit);
   res.json(logs);
+});
+
+const TEMP_CODE_TTL_MS = 5 * 60 * 1000;
+
+function generateTempCode() {
+  return String(Math.floor(100000 + crypto.randomInt(0, 900000)));
+}
+
+app.get('/api/temp-codes', requireAuth, (req, res) => {
+  const codes = db.prepare(`
+    SELECT id, code, note, expires_at, used_at, used_by_ip, revoked, created_at
+    FROM temp_codes
+    ORDER BY created_at DESC
+    LIMIT 100
+  `).all();
+  res.json(codes);
+});
+
+app.post('/api/temp-codes/generate', requireAuth, (req, res) => {
+  const note = (req.body?.note || '').toString().slice(0, 120);
+  const expiresAt = new Date(Date.now() + TEMP_CODE_TTL_MS).toISOString();
+
+  let code;
+  let attempts = 0;
+  while (attempts < 5) {
+    code = generateTempCode();
+    const existing = db.prepare('SELECT id FROM temp_codes WHERE code = ?').get(code);
+    if (!existing) break;
+    attempts++;
+  }
+  if (attempts >= 5) {
+    return res.status(500).json({ error: 'Failed to generate unique code' });
+  }
+
+  const info = getDeviceInfo(req);
+  const result = db.prepare(`
+    INSERT INTO temp_codes (code, generated_by, note, expires_at, created_at)
+    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+  `).run(code, info.ip + (info.userAgent ? '|' + info.userAgent.slice(0, 60) : ''), note, expiresAt);
+
+  const row = db.prepare('SELECT * FROM temp_codes WHERE id = ?').get(result.lastInsertRowid);
+  res.json({ ok: true, code: row });
+});
+
+app.post('/api/temp-codes/:id/revoke', requireAuth, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ error: 'Invalid id' });
+
+  const row = db.prepare('SELECT id FROM temp_codes WHERE id = ?').get(id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+
+  db.prepare('UPDATE temp_codes SET revoked = 1 WHERE id = ?').run(id);
+  res.json({ ok: true });
+});
+
+app.post('/api/temp-codes/login', (req, res) => {
+  const code = (req.body?.code || '').toString().trim().replace(/\D/g, '').slice(0, 6);
+  const deviceName = (req.body?.deviceName || 'Temporary Code Login').toString().slice(0, 100);
+
+  if (!/^\d{6}$/.test(code)) {
+    return res.status(400).json({ verified: false, error: '请输入 6 位数字授权码' });
+  }
+
+  const info = getDeviceInfo(req);
+
+  const tx = db.transaction(() => {
+    const row = db.prepare(`SELECT * FROM temp_codes WHERE code = ?`).get(code);
+
+    if (!row) {
+      db.prepare(`INSERT INTO auth_logs (credential_id, device_name, user_agent, ip_address, success, error_message)
+                  VALUES (?, ?, ?, ?, 0, ?)`).run('temp-code-' + code, deviceName, info.userAgent, info.ip, '授权码不存在');
+      return { status: 400, body: { verified: false, error: '授权码无效' } };
+    }
+
+    if (row.revoked) {
+      db.prepare(`INSERT INTO auth_logs (credential_id, device_name, user_agent, ip_address, success, error_message)
+                  VALUES (?, ?, ?, ?, 0, ?)`).run('temp-code-' + code, deviceName, info.userAgent, info.ip, '授权码已撤销');
+      return { status: 400, body: { verified: false, error: '该授权码已被撤销' } };
+    }
+
+    if (row.used_at) {
+      db.prepare(`INSERT INTO auth_logs (credential_id, device_name, user_agent, ip_address, success, error_message)
+                  VALUES (?, ?, ?, ?, 0, ?)`).run('temp-code-' + code, deviceName, info.userAgent, info.ip, '授权码已被使用');
+      return { status: 400, body: { verified: false, error: '该授权码已被使用，一次性码不能重复使用' } };
+    }
+
+    if (new Date(row.expires_at).getTime() < Date.now()) {
+      db.prepare(`INSERT INTO auth_logs (credential_id, device_name, user_agent, ip_address, success, error_message)
+                  VALUES (?, ?, ?, ?, 0, ?)`).run('temp-code-' + code, deviceName, info.userAgent, info.ip, '授权码已过期');
+      return { status: 400, body: { verified: false, error: '该授权码已过期（有效期 5 分钟）' } };
+    }
+
+    const upd = db.prepare(`
+      UPDATE temp_codes
+      SET used_at = CURRENT_TIMESTAMP, used_by_ip = ?, used_by_ua = ?
+      WHERE id = ? AND used_at IS NULL AND revoked = 0
+    `).run(info.ip, info.userAgent, row.id);
+
+    if (upd.changes === 0) {
+      return { status: 409, body: { verified: false, error: '授权码正在被使用，请稍后重试' } };
+    }
+
+    db.prepare(`INSERT INTO auth_logs (credential_id, device_name, user_agent, ip_address, success)
+                VALUES (?, ?, ?, ?, 1)`).run('temp-code-' + code, deviceName, info.userAgent, info.ip);
+
+    if (!req.session.userId) {
+      req.session.userId = crypto.randomBytes(16).toString('hex');
+    }
+    req.session.tempCodeLogin = true;
+
+    return { status: 200, body: { verified: true } };
+  });
+
+  const out = tx();
+  res.status(out.status).json(out.body);
 });
 
 app.get('/', (req, res) => {

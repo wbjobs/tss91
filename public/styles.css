@@ -147,6 +147,45 @@ body {
   background: var(--bg-hover);
 }
 
+.tabs {
+  display: flex;
+  gap: 4px;
+  background: rgba(15, 23, 42, 0.6);
+  border-radius: 10px;
+  padding: 4px;
+  margin-bottom: 20px;
+}
+
+.tab {
+  flex: 1;
+  padding: 10px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all 0.15s;
+  font-family: inherit;
+}
+
+.tab:hover { color: var(--text); }
+.tab.active {
+  background: var(--bg-hover);
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+
+.tab-icon { font-size: 15px; }
+
+.tab-panel { display: none; flex-direction: column; gap: 16px; }
+.tab-panel.active { display: flex; }
+
 .form-row {
   display: flex;
   flex-direction: column;
@@ -447,6 +486,77 @@ input[type="text"]:focus {
   justify-content: flex-end;
   gap: 10px;
 }
+
+.code-big {
+  font-family: ui-monospace, SFMono-Regular, Menlo, 'Courier New', monospace;
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: 6px;
+  text-align: center;
+  padding: 16px 18px;
+  background: linear-gradient(135deg, rgba(59,130,246,0.25), rgba(168,85,247,0.25));
+  border: 1px solid rgba(59,130,246,0.45);
+  border-radius: 12px;
+  color: #bfdbfe;
+  user-select: all;
+  margin: 8px 0 12px;
+}
+
+.code-copy-hint {
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: -4px;
+}
+
+.code-item {
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.code-item:last-child { border-bottom: none; }
+
+.code-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.code-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.code-num {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--text);
+}
+
+.code-meta {
+  font-size: 12px;
+  color: var(--text-dim);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.code-countdown {
+  font-weight: 600;
+}
+
+.code-countdown.warning { color: #fbbf24; }
+.code-countdown.expired { color: #ef4444; }
 
 @media (max-width: 640px) {
   .app-main {
