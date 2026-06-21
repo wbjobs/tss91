@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>设备管理 · 内部工具</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app-layout">
+    <header class="app-header">
+      <h1>🔐 设备管理控制台</h1>
+      <div class="user-actions">
+        <button id="logout-btn" class="btn btn-ghost">退出登录</button>
+      </div>
+    </header>
+
+    <main class="app-main">
+      <section class="panel">
+        <div class="panel-header">
+          <h2>📱 已注册安全设备</h2>
+          <div class="register-row">
+            <input id="new-device-name" type="text" placeholder="新设备名称（如：手机 Face ID）" />
+            <button id="register-btn" class="btn btn-primary">
+              <span class="btn-icon">➕</span> 注册新设备
+            </button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <ul id="device-list" class="device-list"></ul>
+          <div id="device-empty" class="empty-state hidden">暂未注册任何设备</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>📋 认证日志</h2>
+          <span id="log-count" class="log-count"></span>
+        </div>
+        <div class="panel-body">
+          <ul id="log-list" class="log-list"></ul>
+          <div id="log-empty" class="empty-state hidden">暂无认证记录</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="status" class="auth-container hidden" style="min-height:0;position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:100;">
+    <div class="card" style="padding:14px 20px;margin:0;"></div>
+  </div>
+
+  <script src="/app.js"></script>
+  <script>
+    (async function () {
+      const deviceListEl = document.getElementById('device-list');
+      const deviceEmptyEl = document.getElementById('device-empty');
+      const logListEl = document.getElementById('log-list');
+      const logEmptyEl = document.getElementById('log-empty');
+      const logCountEl = document.getElementById('log-count');
+      const registerBtn = document.getElementById('register-btn');
+      const newDeviceNameInput = document.getElementById('new-device-name');
+      const logoutBtn = document.getElementById('logout-btn');
+      const statusEl = document.getElementById('status');
+
+      function showStatus(msg, isError = false) {
+        statusEl.classList.remove('hidden');
+        const card = statusEl.querySelector('.card');
+        card.textContent = msg;
+        card.style.background = isError ? 'rgba(239,68,68,0.15)' : 'rgba(34,197,94,0.15)';
+        card.style.borderColor = isError ? 'rgba(239,68,68,0.4)' : 'rgba(34,197,94,0.4)';
+        card.style.color = isError ? '#fca5a5' : '#86efac';
+        setTimeout(() => statusEl.classList.add('hidden'), 3000);
+      }
+
+      function fmtTime(t) {
+        if (!t) return '—';
+        const d = new Date(t);
+        return d.toLocaleString('zh-CN', { hour12: false });
+      }
+
+      function shortId(id) {
+        return id ? id.slice(0, 10) + '…' : '';
+      }
+
+      async function loadDevices() {
+        const devices = await fetch('/api/devices').then(r => r.json());
+        deviceListEl.innerHTML = '';
+        if (!devices.length) {
+          deviceEmptyEl.classList.remove('hidden');
+          return;
+        }
+        deviceEmptyEl.classList.add('hidden');
+        devices.forEach(dev => {
+          const li = document.createElement('li');
+          li.className = 'device-item';
+          li.innerHTML = `
+            <div class="device-info">
+              <div class="device-name">🔑 ${escapeHtml(dev.device_name || '未命名设备')}</div>
+              <div class="device-meta">
+                <span>ID: <code>${escapeHtml(shortId(dev.credential_id))}</code></span>
+                <span>Counter: ${dev.counter}</span>
+                <span>注册: ${fmtTime(dev.created_at)}</span>
+                <span>最近使用: ${fmtTime(dev.last_used_at)}</span>
+              </div>
+            </div>
+            <button class="btn btn-danger" data-id="${dev.id}">删除</button>
+          `;
+          deviceListEl.appendChild(li);
+        });
+
+        deviceListEl.querySelectorAll('.btn-danger').forEach(btn => {
+          btn.addEventListener('click', () => {
+            if (confirm('确认删除该设备？删除后该设备将无法再登录。')) {
+              deleteDevice(btn.dataset.id);
+            }
+          });
+        });
+      }
+
+      async function deleteDevice(id) {
+        const res = await fetch(`/api/devices/${id}`, { method: 'DELETE' }).then(r => r.json());
+        if (res.ok) {
+          showStatus('设备已删除');
+          loadDevices();
+        } else {
+          showStatus('删除失败', true);
+        }
+      }
+
+      async function loadLogs() {
+        const logs = await fetch('/api/logs?limit=200').then(r => r.json());
+        logListEl.innerHTML = '';
+        logCountEl.textContent = `共 ${logs.length} 条（显示最近 200 条）`;
+        if (!logs.length) {
+          logEmptyEl.classList.remove('hidden');
+          return;
+        }
+        logEmptyEl.classList.add('hidden');
+        logs.forEach(log => {
+          const li = document.createElement('li');
+          li.className = 'log-item';
+          const badge = log.success
+            ? '<span class="badge badge-success">成功</span>'
+            : '<span class="badge badge-danger">失败</span>';
+          const title = log.success ? '认证通过' : (log.error_message || '认证失败');
+          li.innerHTML = `
+            <div class="log-time">${fmtTime(log.timestamp)}</div>
+            <div class="log-body">
+              <div class="log-title">${badge} ${escapeHtml(log.device_name || '未知设备')}</div>
+              <div class="log-detail" title="${escapeHtml(log.user_agent || '')}">
+                ${escapeHtml(log.ip_address || '')} · ${log.success ? escapeHtml(title) : '<span style="color:#fca5a5;">' + escapeHtml(title) + '</span>'}
+              </div>
+            </div>
+            <div class="log-count"></div>
+          `;
+          logListEl.appendChild(li);
+        });
+      }
+
+      function escapeHtml(s) {
+        return String(s || '').replace(/[&<>"']/g, c => ({
+          '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[c]));
+      }
+
+      registerBtn.addEventListener('click', async () => {
+        const name = newDeviceNameInput.value.trim() || '新设备';
+        registerBtn.disabled = true;
+        showStatus('正在获取注册选项...');
+        try {
+          const options = await fetch('/api/register/options').then(r => r.json());
+          const credential = await navigator.credentials.create({ publicKey: webauthnUI.regOptsToPublicKey(options) });
+          const payload = webauthnUI.regResponseToJSON(credential);
+          payload.deviceName = name;
+          const result = await fetch('/api/register/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          }).then(r => r.json());
+          if (result.verified) {
+            showStatus('✅ 设备注册成功');
+            newDeviceNameInput.value = '';
+            loadDevices();
+            loadLogs();
+          } else {
+            showStatus('❌ 注册失败', true);
+          }
+        } catch (err) {
+          console.error(err);
+          showStatus('❌ ' + (err.message || '注册被取消或失败'), true);
+        } finally {
+          registerBtn.disabled = false;
+        }
+      });
+
+      logoutBtn.addEventListener('click', async () => {
+        await fetch('/api/logout', { method: 'POST' });
+        window.location.href = '/';
+      });
+
+      if (!window.PublicKeyCredential) {
+        registerBtn.disabled = true;
+        registerBtn.title = '浏览器不支持 WebAuthn';
+      }
+
+      loadDevices();
+      loadLogs();
+    })();
+  </script>
+</body>
+</html>

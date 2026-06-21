@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>内部工具 · 安全登录</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="auth-container">
+    <div class="card">
+      <div class="brand">
+        <div class="logo">🔐</div>
+        <h1>内部工具门户</h1>
+        <p class="subtitle">使用指纹、人脸或物理安全密钥登录</p>
+      </div>
+
+      <div id="bootstrap-section" class="section hidden">
+        <div class="notice notice-info">
+          <strong>首次使用</strong> · 系统还没有任何注册设备，请先注册您的第一个安全密钥。
+        </div>
+        <div class="form-row">
+          <label for="bootstrap-device-name">设备名称</label>
+          <input id="bootstrap-device-name" type="text" placeholder="例如：我的笔记本指纹" value="我的设备" />
+        </div>
+        <button id="bootstrap-btn" class="btn btn-primary">
+          <span class="btn-icon">🔑</span> 注册第一个安全密钥
+        </button>
+      </div>
+
+      <div id="auth-section" class="section">
+        <button id="signin-btn" class="btn btn-primary btn-large">
+          <span class="btn-icon">🖐️</span> 使用安全密钥登录
+        </button>
+        <p class="hint">浏览器将提示您使用指纹、面部识别或插入物理安全密钥</p>
+      </div>
+
+      <div id="status" class="status hidden"></div>
+
+      <div class="footer">
+        <span>仅限内网访问 · 所有认证操作均已记录</span>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+  <script>
+    (async function () {
+      const statusEl = document.getElementById('status');
+      const authSection = document.getElementById('auth-section');
+      const bootstrapSection = document.getElementById('bootstrap-section');
+      const signinBtn = document.getElementById('signin-btn');
+      const bootstrapBtn = document.getElementById('bootstrap-btn');
+      const bootstrapDeviceName = document.getElementById('bootstrap-device-name');
+
+      function showStatus(msg, isError = false) {
+        statusEl.textContent = msg;
+        statusEl.classList.remove('hidden', 'error', 'success');
+        statusEl.classList.add(isError ? 'error' : 'success');
+      }
+
+      function hideStatus() {
+        statusEl.classList.add('hidden');
+      }
+
+      try {
+        const session = await fetch('/api/session').then(r => r.json());
+        if (session.authenticated) {
+          window.location.href = '/manage';
+          return;
+        }
+        const devices = await fetch('/api/devices').catch(() => ({ json: () => [] }));
+        const deviceList = await (devices.json && devices.json().catch(() => [])) || [];
+        if (!Array.isArray(deviceList) || deviceList.length === 0) {
+          authSection.classList.add('hidden');
+          bootstrapSection.classList.remove('hidden');
+        }
+      } catch (e) {}
+
+      signinBtn.addEventListener('click', async () => {
+        hideStatus();
+        signinBtn.disabled = true;
+        showStatus('正在获取认证选项...');
+
+        try {
+          const options = await fetch('/api/auth/options').then(r => r.json());
+          const credential = await navigator.credentials.get({ publicKey: webauthnUI.authOptsToPublicKey(options) });
+          const result = await fetch('/api/auth/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(webauthnUI.authResponseToJSON(credential)),
+          }).then(r => r.json());
+
+          if (result.verified) {
+            showStatus('✅ 认证成功，正在进入...');
+            setTimeout(() => window.location.href = '/manage', 500);
+          } else {
+            showStatus('❌ 认证失败', true);
+          }
+        } catch (err) {
+          console.error(err);
+          showStatus('❌ ' + (err.message || '认证被取消或失败'), true);
+        } finally {
+          signinBtn.disabled = false;
+        }
+      });
+
+      bootstrapBtn.addEventListener('click', async () => {
+        hideStatus();
+        bootstrapBtn.disabled = true;
+        showStatus('正在获取注册选项...');
+
+        try {
+          const options = await fetch('/api/register/options').then(r => r.json());
+          const credential = await navigator.credentials.create({ publicKey: webauthnUI.regOptsToPublicKey(options) });
+          const payload = webauthnUI.regResponseToJSON(credential);
+          payload.deviceName = bootstrapDeviceName.value.trim() || '我的设备';
+
+          const result = await fetch('/api/register/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          }).then(r => r.json());
+
+          if (result.verified) {
+            showStatus('✅ 设备注册成功！正在进入管理页...');
+            setTimeout(() => window.location.href = '/manage', 800);
+          } else {
+            showStatus('❌ 注册失败', true);
+          }
+        } catch (err) {
+          console.error(err);
+          showStatus('❌ ' + (err.message || '注册被取消或失败'), true);
+        } finally {
+          bootstrapBtn.disabled = false;
+        }
+      });
+
+      if (!window.PublicKeyCredential) {
+        authSection.classList.add('hidden');
+        bootstrapSection.classList.add('hidden');
+        showStatus('您的浏览器不支持 WebAuthn，请使用 Chrome / Edge / Safari 最新版本', true);
+      }
+    })();
+  </script>
+</body>
+</html>
